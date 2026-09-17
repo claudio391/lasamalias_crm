@@ -81,7 +81,7 @@ st.sidebar.title("🌱 Las Amalias")
 st.sidebar.caption(f"Sesión: {st.session_state.get('auth_user','')}")
 page = st.sidebar.radio(
     "Navegación",
-    ["📊 Dashboard", "👥 Clientes", "📞 Comunicaciones", "🧾 Productos",
+    ["🔧 Diagnóstico", "📊 Dashboard", "👥 Clientes", "📞 Comunicaciones", "🧾 Productos",
      "💰 Ventas", "📦 Compras", "📈 Proyecciones", "🤝 Postventa"],
 )
 if st.sidebar.button("Cerrar sesión"):
@@ -110,9 +110,34 @@ def productos_options():
 
 
 # =====================================================================
+# DIAGNÓSTICO (temporal, para depurar la conexión a Supabase)
+# =====================================================================
+if page == "🔧 Diagnóstico":
+    st.title("🔧 Diagnóstico de conexión")
+    import requests as _requests
+
+    url = st.secrets.get("SUPABASE_URL", "")
+    key = st.secrets.get("SUPABASE_KEY", "")
+
+    st.write("**SUPABASE_URL leída:**", repr(url))
+    st.write("**Longitud de SUPABASE_KEY:**", len(key))
+    st.write("**Primeros 15 caracteres de la key:**", repr(key[:15]))
+    st.write("**Últimos 10 caracteres de la key:**", repr(key[-10:]))
+
+    if st.button("Probar consulta directa a /rest/v1/clientes"):
+        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+        try:
+            r = _requests.get(f"{url}/rest/v1/clientes?select=*&limit=1", headers=headers, timeout=15)
+            st.write("**Status code:**", r.status_code)
+            st.write("**Content-Type:**", r.headers.get("content-type"))
+            st.code(r.text[:2000])
+        except Exception as e:
+            st.error(f"Excepción al hacer la request: {e}")
+
+# =====================================================================
 # DASHBOARD
 # =====================================================================
-if page == "📊 Dashboard":
+elif page == "📊 Dashboard":
     st.title("📊 Panel General")
 
     clientes = cached_fetch("clientes")
