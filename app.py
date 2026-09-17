@@ -34,8 +34,14 @@ def fetch(table: str, select: str = "*", order_by: str | None = None, desc: bool
     query = supabase.table(table).select(select)
     if order_by:
         query = query.order(order_by, desc=desc)
+ try:
     res = query.execute()
-    return pd.DataFrame(res.data)
+except Exception as e:
+    if hasattr(e, "response") and e.response is not None:
+        print("Respuesta cruda del servidor:", e.response.text)
+    raise e
+ #  res = query.execute()
+ #   return pd.DataFrame(res.data)
 
 
 def clear_cache():
