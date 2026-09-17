@@ -1,6 +1,8 @@
 """
 LAS AMALIAS — CRM
-App en Streamlit conectada a Supabase (PostgreSQL).
+App en Streamlit conectada a Supabase vía la API REST (PostgREST) directamente
+con `requests`, evitando la librería `supabase-py` (que presenta bugs de
+compatibilidad con las versiones recientes de Python/pydantic).
 
 Ejecutar localmente:
     streamlit run app.py
@@ -11,49 +13,60 @@ con SUPABASE_URL, SUPABASE_KEY y credenciales de acceso a la app.
 
 import streamlit as st
 import pandas as pd
+import requests
 import plotly.express as px
-from datetime import date, datetime
-from supabase import create_client
+from datetime import date
 
 st.set_page_config(page_title="Las Amalias — CRM", page_icon="🌱", layout="wide")
 
 # =====================================================================
-# CONEXIÓN A SUPABASE
+# CONEXIÓN A SUPABASE (REST directo, sin supabase-py)
 # =====================================================================
-@st.cache_resource
-def get_client():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+SUPABASE_URL = st.secrets["SUPABASE_URL"].rstrip("/")
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+REST_BASE = f"{SUPABASE_URL}/rest/v1"
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+}
 
 
-supabase = get_client()
+def db_select(table: str, select: str = "*", order: str | None = None, desc: bool = True) -> pd.DataFrame:
+    params = {"select": select}
+    if order:
+        params["order"] = f"{order}.{'desc' if desc else 'asc'}"
+    r = requests.get(f"{REST_BASE}/{table}", headers=HEADERS, params=params, timeout=20)
+    if not r.ok:
+        st.error(f"Error leyendo '{table}': {r.status_code} — {r.text[:300]}")
+        return pd.DataFrame()
+    return pd.DataFrame(r.json())
 
-def fetch(table: str, select: str = "*", order_by: str | None = None, desc: bool = True):
-    query = supabase.table(table).select(select)
-    if order_by:
-        query = query.order(order_by, desc=desc)
-    try:
-        res = query.execute()
-        return res.data
-    except Exception as e:
-        # Estas dos líneas deben estar indentadas dentro del except
-        if hasattr(e, "response") and e.response is not None:
-            print("Respuesta cruda del servidor:", e.response.text)
-        raise e
 
-#def fetch(table: str, select: str = "*", order_by: str | None = None, desc: bool = True) -> pd.DataFrame:
-  #  query = supabase.table(table).select(select)
-   # if order_by:
- #       query = query.order(order_by, desc=desc)
-  #  try:
- #       res = query.execute()
-#    except Exception as e:
-#    if hasattr(e, "response") and e.response is not None:
-#        print("Respuesta cruda del servidor:", e.response.text)
-#    raise e
- #  res = query.execute()
- #   return pd.DataFrame(res.data)
+def db_insert(table: str, payload: dict):
+    h = {**HEADERS, "Prefer": "return=representation"}
+    r = requests.post(f"{REST_BASE}/{table}", headers=h, json=payload, timeout=20)
+    if not r.ok:
+        st.error(f"Error guardando en '{table}': {r.status_code} — {r.text[:300]}")
+        return None
+    return r.json()
+
+
+def db_update(table: str, payload: dict, record_id: str):
+    h = {**HEADERS, "Prefer": "return=representation"}
+    r = requests.patch(f"{REST_BASE}/{table}", headers=h, params={"id": f"eq.{record_id}"}, json=payload, timeout=20)
+    if not r.ok:
+        st.error(f"Error actualizando '{table}': {r.status_code} — {r.text[:300]}")
+        return None
+    return r.json()
+
+
+def db_delete(table: str, record_id: str):
+    r = requests.delete(f"{REST_BASE}/{table}", headers=HEADERS, params={"id": f"eq.{record_id}"}, timeout=20)
+    if not r.ok:
+        st.error(f"Error eliminando en '{table}': {r.status_code} — {r.text[:300]}")
+        return False
+    return True
 
 
 def clear_cache():
@@ -61,8 +74,8 @@ def clear_cache():
 
 
 @st.cache_data(ttl=30)
-def cached_fetch(table: str, select: str = "*", order_by: str | None = None, desc: bool = True) -> pd.DataFrame:
-    return fetch(table, select, order_by, desc)
+def cached_select(table: str, select: str = "*", order: str | None = None, desc: bool = True) -> pd.DataFrame:
+    return db_select(table, select, order, desc)
 
 
 # =====================================================================
@@ -99,7 +112,7 @@ st.sidebar.title("🌱 Las Amalias")
 st.sidebar.caption(f"Sesión: {st.session_state.get('auth_user','')}")
 page = st.sidebar.radio(
     "Navegación",
-    ["🔧 Diagnóstico", "📊 Dashboard", "👥 Clientes", "📞 Comunicaciones", "🧾 Productos",
+    ["📊 Dashboard", "👥 Clientes", "📞 Comunicaciones", "🧾 Productos",
      "💰 Ventas", "📦 Compras", "📈 Proyecciones", "🤝 Postventa"],
 )
 if st.sidebar.button("Cerrar sesión"):
@@ -112,15 +125,15 @@ st.sidebar.markdown("- [Kioshi Stone / Legacy / Böhm](https://claudio391.github
 
 
 def clientes_options():
-    df = cached_fetch("clientes", "id, empresa")
+    df = cached_select("clientes", "id, empresa")
     if df.empty:
-        return {}, []
+        return {}, df
     opts = dict(zip(df["empresa"] + " · " + df["id"].str[:8], df["id"]))
     return opts, df
 
 
 def productos_options():
-    df = cached_fetch("productos", "id, nombre, marca, precio_unitario")
+    df = cached_select("productos", "id, nombre, marca, precio_unitario")
     if df.empty:
         return {}, df
     opts = dict(zip(df["marca"] + " — " + df["nombre"], df["id"]))
@@ -128,41 +141,16 @@ def productos_options():
 
 
 # =====================================================================
-# DIAGNÓSTICO (temporal, para depurar la conexión a Supabase)
-# =====================================================================
-if page == "🔧 Diagnóstico":
-    st.title("🔧 Diagnóstico de conexión")
-    import requests as _requests
-
-    url = st.secrets.get("SUPABASE_URL", "")
-    key = st.secrets.get("SUPABASE_KEY", "")
-
-    st.write("**SUPABASE_URL leída:**", repr(url))
-    st.write("**Longitud de SUPABASE_KEY:**", len(key))
-    st.write("**Primeros 15 caracteres de la key:**", repr(key[:15]))
-    st.write("**Últimos 10 caracteres de la key:**", repr(key[-10:]))
-
-    if st.button("Probar consulta directa a /rest/v1/clientes"):
-        headers = {"apikey": key, "Authorization": f"Bearer {key}"}
-        try:
-            r = _requests.get(f"{url}/rest/v1/clientes?select=*&limit=1", headers=headers, timeout=15)
-            st.write("**Status code:**", r.status_code)
-            st.write("**Content-Type:**", r.headers.get("content-type"))
-            st.code(r.text[:2000])
-        except Exception as e:
-            st.error(f"Excepción al hacer la request: {e}")
-
-# =====================================================================
 # DASHBOARD
 # =====================================================================
-elif page == "📊 Dashboard":
+if page == "📊 Dashboard":
     st.title("📊 Panel General")
 
-    clientes = cached_fetch("clientes")
-    comunicaciones = cached_fetch("comunicaciones")
-    ventas = cached_fetch("ventas")
-    proyecciones = cached_fetch("proyecciones_ventas")
-    postventa = cached_fetch("postventa")
+    clientes = cached_select("clientes")
+    comunicaciones = cached_select("comunicaciones")
+    ventas = cached_select("ventas")
+    proyecciones = cached_select("proyecciones_ventas")
+    postventa = cached_select("postventa")
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Clientes totales", len(clientes))
@@ -222,7 +210,7 @@ elif page == "👥 Clientes":
     tab1, tab2 = st.tabs(["Listado", "Agregar / Editar"])
 
     with tab1:
-        df = cached_fetch("clientes", order_by="fecha_alta")
+        df = cached_select("clientes", order="fecha_alta")
         filtro = st.text_input("Buscar por empresa o contacto")
         if filtro and not df.empty:
             df = df[df["empresa"].str.contains(filtro, case=False, na=False) |
@@ -237,10 +225,8 @@ elif page == "👥 Clientes":
         if modo == "Editar existente" and opts:
             sel = st.selectbox("Seleccioná el cliente", list(opts.keys()))
             cliente_id = opts[sel]
-            registro = df_all[df_all["id"] == cliente_id].iloc[0].to_dict() if not df_all.empty else {}
-            full = fetch("clientes")
-            full_row = full[full["id"] == cliente_id].iloc[0].to_dict()
-            registro.update(full_row)
+            full = cached_select("clientes")
+            registro = full[full["id"] == cliente_id].iloc[0].to_dict()
 
         with st.form("form_cliente", clear_on_submit=(modo == "Nuevo cliente")):
             empresa = st.text_input("Empresa / Productor *", value=registro.get("empresa", ""))
@@ -271,19 +257,21 @@ elif page == "👥 Clientes":
                     }
                     if modo == "Nuevo cliente":
                         payload["fecha_alta"] = str(date.today())
-                        supabase.table("clientes").insert(payload).execute()
-                        st.success("Cliente creado.")
+                        if db_insert("clientes", payload) is not None:
+                            st.success("Cliente creado.")
+                            clear_cache()
+                            st.rerun()
                     else:
-                        supabase.table("clientes").update(payload).eq("id", cliente_id).execute()
-                        st.success("Cliente actualizado.")
-                    clear_cache()
-                    st.rerun()
+                        if db_update("clientes", payload, cliente_id) is not None:
+                            st.success("Cliente actualizado.")
+                            clear_cache()
+                            st.rerun()
 
             if eliminar and cliente_id:
-                supabase.table("clientes").delete().eq("id", cliente_id).execute()
-                st.success("Cliente eliminado.")
-                clear_cache()
-                st.rerun()
+                if db_delete("clientes", cliente_id):
+                    st.success("Cliente eliminado.")
+                    clear_cache()
+                    st.rerun()
 
 # =====================================================================
 # COMUNICACIONES
@@ -294,7 +282,7 @@ elif page == "📞 Comunicaciones":
 
     tab1, tab2 = st.tabs(["Listado", "Nuevo registro"])
     with tab1:
-        df = fetch("comunicaciones", "*, clientes(empresa)", order_by="fecha", desc=True)
+        df = db_select("comunicaciones", "*, clientes(empresa)", order="fecha", desc=True)
         if not df.empty and "clientes" in df.columns:
             df["cliente"] = df["clientes"].apply(lambda x: x.get("empresa") if isinstance(x, dict) else None)
             df = df.drop(columns=["clientes", "cliente_id"])
@@ -314,15 +302,16 @@ elif page == "📞 Comunicaciones":
                 responsable = st.text_input("Responsable")
                 estado = st.selectbox("Estado", ["Pendiente", "Realizado", "Cancelado"])
                 if st.form_submit_button("💾 Guardar"):
-                    supabase.table("comunicaciones").insert({
+                    payload = {
                         "cliente_id": opts[sel], "fecha": str(fecha), "canal": canal,
                         "resumen": resumen, "proxima_accion": proxima_accion,
                         "fecha_proximo_seguimiento": str(fecha_prox) if fecha_prox else None,
                         "responsable": responsable, "estado": estado,
-                    }).execute()
-                    st.success("Comunicación registrada.")
-                    clear_cache()
-                    st.rerun()
+                    }
+                    if db_insert("comunicaciones", payload) is not None:
+                        st.success("Comunicación registrada.")
+                        clear_cache()
+                        st.rerun()
 
 # =====================================================================
 # PRODUCTOS
@@ -333,7 +322,7 @@ elif page == "🧾 Productos":
 
     tab1, tab2 = st.tabs(["Catálogo", "Agregar / Editar"])
     with tab1:
-        df = cached_fetch("productos", order_by="marca")
+        df = cached_select("productos", order="marca")
         marca_filtro = st.multiselect("Filtrar por marca", sorted(df["marca"].unique()) if not df.empty else [])
         if marca_filtro:
             df = df[df["marca"].isin(marca_filtro)]
@@ -353,7 +342,7 @@ elif page == "🧾 Productos":
         if modo == "Editar existente" and opts:
             sel = st.selectbox("Seleccioná el producto", list(opts.keys()))
             prod_id = opts[sel]
-            full = fetch("productos")
+            full = cached_select("productos")
             registro = full[full["id"] == prod_id].iloc[0].to_dict()
 
         with st.form("form_producto", clear_on_submit=(modo == "Nuevo producto")):
@@ -385,19 +374,21 @@ elif page == "🧾 Productos":
                         "activo": activo,
                     }
                     if modo == "Nuevo producto":
-                        supabase.table("productos").insert(payload).execute()
-                        st.success("Producto creado.")
+                        if db_insert("productos", payload) is not None:
+                            st.success("Producto creado.")
+                            clear_cache()
+                            st.rerun()
                     else:
-                        supabase.table("productos").update(payload).eq("id", prod_id).execute()
-                        st.success("Producto actualizado.")
-                    clear_cache()
-                    st.rerun()
+                        if db_update("productos", payload, prod_id) is not None:
+                            st.success("Producto actualizado.")
+                            clear_cache()
+                            st.rerun()
 
             if eliminar and prod_id:
-                supabase.table("productos").delete().eq("id", prod_id).execute()
-                st.success("Producto eliminado.")
-                clear_cache()
-                st.rerun()
+                if db_delete("productos", prod_id):
+                    st.success("Producto eliminado.")
+                    clear_cache()
+                    st.rerun()
 
 # =====================================================================
 # VENTAS
@@ -409,7 +400,7 @@ elif page == "💰 Ventas":
 
     tab1, tab2 = st.tabs(["Listado", "Nueva venta"])
     with tab1:
-        df = fetch("ventas", "*, clientes(empresa), productos(nombre, marca)", order_by="fecha_venta", desc=True)
+        df = db_select("ventas", "*, clientes(empresa), productos(nombre, marca)", order="fecha_venta", desc=True)
         if not df.empty:
             df["cliente"] = df["clientes"].apply(lambda x: x.get("empresa") if isinstance(x, dict) else None)
             df["producto"] = df["productos"].apply(lambda x: x.get("nombre") if isinstance(x, dict) else None)
@@ -433,14 +424,15 @@ elif page == "💰 Ventas":
                 responsable = st.text_input("Responsable")
                 notas = st.text_area("Notas")
                 if st.form_submit_button("💾 Guardar venta"):
-                    supabase.table("ventas").insert({
+                    payload = {
                         "cliente_id": opts_c[sel_c], "producto_id": opts_p[sel_p],
                         "fecha_venta": str(fecha), "cantidad": cantidad, "precio_unitario": precio,
                         "estado": estado, "responsable": responsable, "notas": notas,
-                    }).execute()
-                    st.success("Venta registrada.")
-                    clear_cache()
-                    st.rerun()
+                    }
+                    if db_insert("ventas", payload) is not None:
+                        st.success("Venta registrada.")
+                        clear_cache()
+                        st.rerun()
 
 # =====================================================================
 # COMPRAS
@@ -451,7 +443,7 @@ elif page == "📦 Compras":
 
     tab1, tab2 = st.tabs(["Listado", "Nueva compra"])
     with tab1:
-        df = fetch("compras", "*, productos(nombre, marca)", order_by="fecha_compra", desc=True)
+        df = db_select("compras", "*, productos(nombre, marca)", order="fecha_compra", desc=True)
         if not df.empty:
             df["producto"] = df["productos"].apply(lambda x: x.get("nombre") if isinstance(x, dict) else None)
             df = df.drop(columns=["productos"])
@@ -473,18 +465,20 @@ elif page == "📦 Compras":
                     if not proveedor:
                         st.error("El proveedor es obligatorio.")
                     else:
-                        supabase.table("compras").insert({
+                        payload = {
                             "proveedor": proveedor, "producto_id": opts_p[sel_p],
                             "fecha_compra": str(fecha), "cantidad": cantidad,
                             "costo_unitario": costo, "estado": estado, "notas": notas,
-                        }).execute()
-                        if estado == "Recibido":
-                            prod_row = df_prod[df_prod["id"] == opts_p[sel_p]].iloc[0]
-                            nuevo_stock = float(prod_row["stock_actual"]) + cantidad
-                            supabase.table("productos").update({"stock_actual": nuevo_stock}).eq("id", opts_p[sel_p]).execute()
-                        st.success("Compra registrada.")
-                        clear_cache()
-                        st.rerun()
+                        }
+                        if db_insert("compras", payload) is not None:
+                            if estado == "Recibido":
+                                prod_row = df_prod[df_prod["id"] == opts_p[sel_p]].iloc[0]
+                                nuevo_stock = float(prod_row["stock_actual"]) + cantidad if "stock_actual" in prod_row else None
+                                if nuevo_stock is not None:
+                                    db_update("productos", {"stock_actual": nuevo_stock}, opts_p[sel_p])
+                            st.success("Compra registrada.")
+                            clear_cache()
+                            st.rerun()
 
 # =====================================================================
 # PROYECCIONES DE VENTAS
@@ -496,7 +490,7 @@ elif page == "📈 Proyecciones":
 
     tab1, tab2 = st.tabs(["Listado", "Nueva proyección"])
     with tab1:
-        df = fetch("proyecciones_ventas", "*, clientes(empresa), productos(nombre)", order_by="mes", desc=True)
+        df = db_select("proyecciones_ventas", "*, clientes(empresa), productos(nombre)", order="mes", desc=True)
         if not df.empty:
             df["cliente"] = df["clientes"].apply(lambda x: x.get("empresa") if isinstance(x, dict) else None)
             df["producto"] = df["productos"].apply(lambda x: x.get("nombre") if isinstance(x, dict) else None)
@@ -518,14 +512,15 @@ elif page == "📈 Proyecciones":
                 estado = st.selectbox("Estado", ["Abierto", "Cerrado", "Perdido"])
                 if st.form_submit_button("💾 Guardar proyección"):
                     mes_normalizado = mes.replace(day=1)
-                    supabase.table("proyecciones_ventas").insert({
+                    payload = {
                         "cliente_id": opts_c[sel_c], "producto_id": opts_p[sel_p],
                         "mes": str(mes_normalizado), "monto_proyectado": monto_proy,
                         "monto_real": monto_real, "estado": estado,
-                    }).execute()
-                    st.success("Proyección registrada.")
-                    clear_cache()
-                    st.rerun()
+                    }
+                    if db_insert("proyecciones_ventas", payload) is not None:
+                        st.success("Proyección registrada.")
+                        clear_cache()
+                        st.rerun()
 
 # =====================================================================
 # POSTVENTA
@@ -537,7 +532,7 @@ elif page == "🤝 Postventa":
 
     tab1, tab2 = st.tabs(["Listado", "Nuevo registro"])
     with tab1:
-        df = fetch("postventa", "*, clientes(empresa), productos(nombre)", order_by="fecha_venta", desc=True)
+        df = db_select("postventa", "*, clientes(empresa), productos(nombre)", order="fecha_venta", desc=True)
         if not df.empty:
             df["cliente"] = df["clientes"].apply(lambda x: x.get("empresa") if isinstance(x, dict) else None)
             df["producto"] = df["productos"].apply(lambda x: x.get("nombre") if isinstance(x, dict) else None)
@@ -558,7 +553,7 @@ elif page == "🤝 Postventa":
                 estado = st.selectbox("Estado", ["En seguimiento", "Completado", "Sin respuesta"])
                 notas = st.text_area("Notas")
                 if st.form_submit_button("💾 Guardar"):
-                    supabase.table("postventa").insert({
+                    payload = {
                         "cliente_id": opts_c[sel_c],
                         "producto_id": opts_p[sel_p] if sel_p else None,
                         "fecha_venta": str(fecha_venta),
@@ -566,7 +561,8 @@ elif page == "🤝 Postventa":
                         "encuesta_satisfaccion": encuesta,
                         "fecha_estimada_recompra": str(fecha_recompra) if fecha_recompra else None,
                         "estado": estado, "notas": notas,
-                    }).execute()
-                    st.success("Registro de postventa guardado.")
-                    clear_cache()
-                    st.rerun()
+                    }
+                    if db_insert("postventa", payload) is not None:
+                        st.success("Registro de postventa guardado.")
+                        clear_cache()
+                        st.rerun()
