@@ -10,7 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Consulta liviana a la base
+        env:
+          URL: ${{ secrets.SUPABASE_URL }}
+          KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          curl -sf "${{ secrets.SUPABASE_URL }}/rest/v1/clientes?select=*&limit=1" \
-            -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
-            -o /dev/null && echo "Supabase respondió OK"
+          code=$(curl -s -o respuesta.txt -w "%{http_code}" \
+            "${URL%/}/rest/v1/clientes?select=*&limit=1" \
+            -H "apikey: $KEY")
+          echo "Código HTTP: $code"
+          if [ "$code" != "200" ]; then
+            echo "Respuesta de Supabase:"
+            head -c 300 respuesta.txt
+            exit 1
+          fi
+          echo "Supabase respondió OK"
